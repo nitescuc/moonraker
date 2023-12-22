@@ -914,11 +914,119 @@ class KiriMoto(BaseSlicer):
             r"; firstLayerBedTemp = (%F)", self.header_data
         )
 
+class Creality(BaseSlicer):
+    def check_identity(self, data: str) -> Optional[Dict[str, str]]:
+        aliases = {
+            'Creative3D': r"Creative3D",
+            'Creality': r"Creality"
+        }
+        pattern = r'Version : V([\d\.]+)'
+        match_version = re.search(pattern, data)
+        slicer_version = match_version.group(1) if match_version else "1.0"
+        for name, expr in aliases.items():
+            match = re.search(expr, data)
+            # ;Creality Print Version : V4.3.7.6456
+            if match:
+                return {
+                    'slicer': name,
+                    'slicer_version': slicer_version
+                }
+        return None
+
+    def has_objects(self) -> bool:
+        return self._check_has_objects(self.header_data, r"\n;MESH:")
+
+    def parse_first_layer_height(self) -> Optional[float]:
+        return regex_find_float(r";MINZ:(%F)", self.footer_data)
+
+    def parse_layer_height(self) -> Optional[float]:
+        self.layer_height = regex_find_float(
+            r";Layer\sHeight:(%F)", self.footer_data
+        )
+        return self.layer_height
+
+    def parse_object_height(self) -> Optional[float]:
+#        return regex_find_float(r";MAXZ:(%F)", self.header_data)
+        matches = re.findall(
+            r";MAXZ:(\d+\.?\d*)", self.footer_data)
+        if matches:
+            try:
+                matches = [float(m) for m in matches]
+            except Exception:
+                pass
+            else:
+                return max(matches)
+        return self.regex_finf_float(r"G1\sZ(%F)", self.footer_data)
+
+    def parse_layer_count(self) -> Optional[int]:
+        return regex_find_int(r";LAYER_COUNT\:(%D)", self.header_data)
+
+    def parse_filament_type(self) -> Optional[str]:
+        return regex_find_string(r";Material\sType:(%S)", self.header_data)
+
+    def parse_filament_name(self) -> Optional[str]:
+        return regex_find_string(r";Material\sName:(%S)", self.header_data)
+
+    def parse_filament_total(self) -> Optional[float]:
+        filament = regex_find_float(r";Filament\sused:(%F)m", self.footer_data)
+        if filament is not None:
+            filament *= 1000
+        return filament
+
+    def parse_filament_weight_total(self) -> Optional[float]:
+        filament = regex_find_float(r";Filament\sused:(%F)m", self.footer_data)
+        return filament * 5.88
+
+    def parse_estimated_time(self) -> Optional[float]:
+        return regex_find_max_float(r";TIME:(%F)", self.footer_data)
+
+    def parse_first_layer_extr_temp(self) -> Optional[float]:
+        return regex_find_float(r"Print\sTemperature:(%F)", self.footer_data)
+
+    def parse_first_layer_bed_temp(self) -> Optional[float]:
+        return regex_find_float(r"Bed\sTemperature:(%F)", self.footer_data)
+
+    def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
+        # Attempt to parse thumbnails from file metadata
+        thumbs = super().parse_thumbnails()
+        if thumbs is not None:
+            return thumbs
+        # Check for thumbnails extracted from the ufp
+        thumb_dir = os.path.join(os.path.dirname(self.path), ".thumbs")
+        thumb_base = os.path.splitext(os.path.basename(self.path))[0]
+        thumb_path = os.path.join(thumb_dir, f"{thumb_base}.png")
+        rel_path_full = os.path.join(".thumbs", f"{thumb_base}.png")
+        rel_path_small = os.path.join(".thumbs", f"{thumb_base}-32x32.png")
+        thumb_path_small = os.path.join(thumb_dir, f"{thumb_base}-32x32.png")
+        if not os.path.isfile(thumb_path):
+            return None
+        # read file
+        thumbs = []
+        try:
+            with Image.open(thumb_path) as im:
+                thumbs.append({
+                    'width': im.width, 'height': im.height,
+                    'size': os.path.getsize(thumb_path),
+                    'relative_path': rel_path_full
+                })
+                # Create 32x32 thumbnail
+                im.thumbnail((32, 32), Image.Resampling.LANCZOS)
+                im.save(thumb_path_small, format="PNG")
+                thumbs.insert(0, {
+                    'width': im.width, 'height': im.height,
+                    'size': os.path.getsize(thumb_path_small),
+                    'relative_path': rel_path_small
+                })
+        except Exception as e:
+            logger.info(str(e))
+            return None
+        return thumbs
+
 
 READ_SIZE = 1024 * 1024  # 1 MiB
 SUPPORTED_SLICERS: List[Type[BaseSlicer]] = [
     PrusaSlicer, Slic3rPE, Slic3r, Cura, Simplify3D,
-    KISSlicer, IdeaMaker, IceSL, KiriMoto
+    KISSlicer, IdeaMaker, IceSL, KiriMoto, Creality
 ]
 SUPPORTED_DATA = [
     'gcode_start_byte',
@@ -1000,11 +1108,17 @@ def get_slicer(file_path: str) -> Tuple[BaseSlicer, Dict[str, str]]:
             slicer = UnknownSlicer(file_path)
             ident = slicer.check_identity(header_data)
         if size > READ_SIZE * 2:
-            f.seek(size - READ_SIZE)
-            footer_data = f.read()
+            if type(slicer) == Creality:
+                footer_data = header_data
+            else:
+                f.seek(size - READ_SIZE)
+                footer_data = f.read()
         elif size > READ_SIZE:
-            remaining = size - READ_SIZE
-            footer_data = header_data[remaining - READ_SIZE:] + f.read()
+            if type(slicer) == Creality:
+                footer_data = header_data
+            else:
+                remaining = size - READ_SIZE
+                footer_data = header_data[remaining - READ_SIZE:] + f.read()
         else:
             footer_data = header_data
         slicer.set_data(header_data, footer_data, size)
